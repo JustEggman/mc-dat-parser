@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Minecraft Player .dat Çözücü (NBT Parser)</title>
+  <style>
+    :root { --bg:#0b0f14; --card:#111926; --muted:#9fb0c0; --text:#eaf2f9; --acc:#5cc8ff; --ok:#6de58c; --warn:#ffd166; --err:#ff6b6b; }
+    html,body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Ubuntu,Arial}
+    .wrap{max-width:1100px;margin:32px auto;padding:0 16px}
+    .card{background:var(--card);border:1px solid #223040;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    .header{padding:20px 22px;border-bottom:1px solid #223040}
+    h1{margin:0;font-size:22px;letter-spacing:.2px}
+    .content{padding:18px 22px}
+    .row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+    input[type=file]{appearance:none;background:#0f1722;border:1px solid #223040;border-radius:12px;padding:12px;color:var(--muted)}
+    .btn{cursor:pointer;user-select:none;background:linear-gradient(180deg,#1f2d3d,#172334);border:1px solid #243447;border-radius:12px;padding:10px 14px;color:var(--text)}
+    .btn:hover{filter:brightness(1.08)}
+    .pill{display:inline-flex;gap:8px;align-items:center;border-radius:999px;padding:8px 12px;background:#0f1722;border:1px solid #223040;color:var(--muted);font-size:12px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-top:18px}
+    .tile{background:#0f1722;border:1px solid #223040;border-radius:14px;padding:14px}
+    .k{color:#86a8c7}
+    .v{color:#eaf2f9}
+    .muted{color:var(--muted)}
+    details{background:#0f1722;border:1px solid #223040;border-radius:12px;padding:10px 14px}
+    summary{cursor:pointer;font-weight:600}
+    pre{max-height:420px;overflow:auto;background:#0a121b;border:1px solid #1b2634;border-radius:12px;padding:12px}
+    .good{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--err)}
+    .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace}
+    .tiny{font-size:12px}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="header">
+      <h1>🏷️ Minecraft Player <code>.dat</code> Çözücü (NBT Parser)</h1>
+      <div class="muted tiny">Dosya cihazınızda işlenir. Sunucuya yüklenmez.</div>
+    </div>
+    <div class="content">
+      <div class="row">
+        <input id="file" type="file" accept=".dat,.nbt,.gz,application/octet-stream" />
+        <button id="parse" class="btn">Çözümle</button>
+        <span id="status" class="pill">Hazır</span>
+        <button id="downloadJson" class="btn" disabled>JSON indir</button>
+      </div>
+
+      <div id="summary" class="grid" style="display:none;margin-top:10px"></div>
+
+      <div style="margin-top:18px;display:none" id="sections">
+        <div class="grid">
+          <div class="tile">
+            <div class="muted tiny">Konum</div>
+            <div id="pos"></div>
+          </div>
+          <div class="tile">
+            <div class="muted tiny">Yeniden Doğma (Spawn)</div>
+            <div id="spawn"></div>
+          </div>
+          <div class="tile">
+            <div class="muted tiny">Son Ölüm</div>
+            <div id="death"></div>
+          </div>
+          <div class="tile">
+            <div class="muted tiny">Seçili Eşya</div>
+            <div id="selected"></div>
+          </div>
+        </div>
+
+        <div style="margin-top:18px" class="grid">
+          <div class="tile" style="grid-column:1/-1">
+            <div class="muted tiny">Envanter</div>
+            <div id="inventory"></div>
+          </div>
+          <div class="tile" style="grid-column:1/-1">
+            <div class="muted tiny">Ender Chest</div>
+            <div id="ender"></div>
+          </div>
+        </div>
+
+        <div style="margin-top:18px">
+          <details>
+            <summary>Ham NBT (ağaç görünümü)</summary>
+            <pre id="tree" class="mono"></pre>
+          </details>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ==== Yardımcılar ==== */
+const el = id => document.getElementById(id);
+const statusPill = (txt, cls='') => { const s = el('status'); s.textContent = txt; s.className = 'pill ' + cls; };
+const fmtDim = v => typeof v === 'string' ? v : (v && v.value) || String(v);
+const safe = v => (v===undefined||v===null) ? '—' : (typeof v==='object' ? JSON.stringify(v) : String(v));
+const toFixedMaybe = (n) => (typeof n === 'number') ? (Math.abs(n)>=1e6 ? n.toExponential(2) : n.toFixed(2)) : String(n);
+
+/* ==== GZIP’i açmayı dene (DecompressionStream destekli) ==== */
+async function maybeDecompressGzip(buf) {
+  // Birçok player.dat gzip’li gelir. DecompressionStream çoğu modern tarayıcıda var.
+  // GZIP imzası 1F 8B ise dene.
+  const u8 = new Uint8Array(buf);
+  const isGzip = u8[0] === 0x1f && u8[1] === 0x8b;
+  if (isGzip && 'DecompressionStream' in window) {
+    const ds = new DecompressionStream('gzip');
+    const decompressed = await new Response(new Blob([buf]).stream().pipeThrough(ds)).arrayBuffer();
+    return decompressed;
+  }
+  return buf; // ya ham NBT’dir ya da tarayıcı açamıyordur
+}
+
+/* ==== NBT Parser (Big-Endian) ==== */
+class NBTReader {
+  constructor(buf){ this.view=new DataView(buf); this.u8=new Uint8Array(buf); this.off=0; }
+  eof(){ return this.off >= this.view.byteLength; }
+  u8b(){ const v=this.view.getUint8(this.off); this.off+=1; return v; }
+  i8(){ const v=this.view.getInt8(this.off); this.off+=1; return v; }
+  i16(){ const v=this.view.getInt16(this.off,false); this.off+=2; return v; }        // BE
+  i32(){ const v=this.view.getInt32(this.off,false); this.off+=4; return v; }
+  i64(){ const v=this.view.getBigInt64(this.off,false); this.off+=8; return v; }
+  f32(){ const v=this.view.getFloat32(this.off,false); this.off+=4; return v; }
+  f64(){ const v=this.view.getFloat64(this.off,false); this.off+=8; return v; }
+  str(){
+    const len=this.i16();
+    const bytes=this.u8.subarray(this.off,this.off+len); this.off+=len;
+    return new TextDecoder().decode(bytes);
+  }
+
+  readTagPayload(type){
+    switch(type){
+      case 1: return this.i8();                           // Byte
+      case 2: return this.i16();                          // Short
+      case 3: return this.i32();                          // Int
+      case 4: return this.i64();                          // Long (BigInt)
+      case 5: return this.f32();                          // Float
+      case 6: return this.f64();                          // Double
+      case 7: {                                           // Byte_Array
+        const n=this.i32(); const arr=new Int8Array(n);
+        for(let i=0;i<n;i++) arr[i]=this.i8(); return Array.from(arr);
+      }
+      case 8: return this.str();                          // String
+      case 9: {                                           // List
+        const subType=this.u8b();
+        const n=this.i32();
+        const arr=new Array(n);
+        for(let i=0;i<n;i++) arr[i]=this.readTagPayload(subType);
+        return { _type:'list', subtype:subType, value:arr };
+      }
+      case 10:{                                           // Compound
+        const obj={};
+        while(true){
+          const t=this.u8b();
+          if (t===0) break; // End
+          const name=this.str();
+          obj[name]=this.readTagPayload(t);
+        }
+        return obj;
+      }
+      case 11:{                                           // Int_Array
+        const n=this.i32(); const arr=new Int32Array(n);
+        for(let i=0;i<n;i++) arr[i]=this.i32(); return Array.from(arr);
+      }
+      case 12:{                                           // Long_Array
+        const n=this.i32(); const arr=new Array(n);
+        for(let i=0;i<n;i++) arr[i]=this.i64(); return arr; // BigInt[]
+      }
+      default: throw new Error('Bilinmeyen NBT türü: '+type);
+    }
+  }
+
+  readRoot(){
+    const type=this.u8b(); // genelde 10 (Compound)
+    if (type!==10) throw new Error('Kök NBT Compound (10) bekleniyordu, geldi: '+type);
+    const name=this.str(); // kök ismi (genelde boş veya "Player")
+    const payload=this.readTagPayload(10);
+    return { name, data: payload };
+  }
+}
+
+/* ==== Alan seçiciler (player.dat uyumlu, sürümlere toleranslı) ==== */
+function getPos(data){
+  // Pos: list<double>[x,y,z]
+  const pos = data?.Pos?.value ?? data?.Pos;
+  if (Array.isArray(pos) && pos.length>=3) return {x:pos[0], y:pos[1], z:pos[2]};
+  return null;
+}
+
+function getSpawn(data){
+  // Eski sürümler: SpawnX, SpawnY, SpawnZ (+ SpawnDimension veya Dimension)
+  // Yeni sürümler: "Spawn" veya "SpawnPoint" benzeri alanlar nadir; en güvenlisi klasik alanlar.
+  let dim = data?.SpawnDimension ?? data?.SpawnWorld ?? data?.Dimension;
+  // Bazı sürümlerde Dimension bir string yerine sayı/obj olabilir; gösterilebilir stringe çeviriyoruz.
+  const sx = data?.SpawnX, sy = data?.SpawnY, sz = data?.SpawnZ;
+  const forced = data?.SpawnForced;
+  const angle = data?.SpawnAngle;
+  if (sx !== undefined && sy !== undefined && sz !== undefined) {
+    return {x:sx,y:sy,z:sz,dimension:dim,forced,angle};
+  }
+  return null;
+}
+
+function getDeath(data){
+  // 1.20+ sürümlerde: LastDeathLocation: { dimension: "minecraft:...", pos: {X:int,Y:int,Z:int} } veya benzeri
+  const ldl = data?.LastDeathLocation || data?.last_death_location;
+  if (ldl){
+    const d = ldl.dimension ?? ldl.Dimension ?? ldl.dim;
+    const p = ldl.pos ?? ldl.block_position ?? ldl.Position;
+    if (p && (('X' in p) || Array.isArray(p))) {
+      const x = Array.isArray(p) ? p[0] : p.X;
+      const y = Array.isArray(p) ? p[1] : p.Y;
+      const z = Array.isArray(p) ? p[2] : p.Z;
+      return {dimension:d, x, y, z};
+    }
+  }
+  // Bazı mod/sürümlerde sadece "DeathTime" bulunur; konum vermez.
+  if (data?.DeathTime !== undefined) return { note: 'DeathTime mevcut ancak konum alanı yok', ticks: data.DeathTime };
+  return null;
+}
+
+function normalizeItem(it){
+  if (!it || typeof it!=='object') return null;
+  // En yaygını: {id:"minecraft:stone", Count:1, Slot:0, tag:{...}}
+  const id = it.id || it.Name || it.Item || it.item;
+  const Count = it.Count ?? it.count ?? 1;
+  const Slot = it.Slot ?? it.slot;
+  const tag = it.tag || it.Tag || it.nbt;
+  return { id, Count, Slot, tag };
+}
+
+function getList(listLike){
+  // NBT List’i { _type:'list', subtype, value:[...] } şeklinde geliyor; ya da doğrudan JS array olabilir.
+  if (!listLike) return [];
+  if (Array.isArray(listLike)) return listLike;
+  if (listLike && listLike._type==='list') return listLike.value || [];
+  return [];
+}
+
+function getInventory(data){
+  return getList(data?.Inventory).map(normalizeItem).filter(Boolean);
+}
+
+function getEnder(data){
+  return getList(data?.EnderItems).map(normalizeItem).filter(Boolean);
+}
+
+function getSelectedItem(data){
+  const s = data?.SelectedItem || data?.Selected_Item;
+  return normalizeItem(s);
+}
+
+/* ==== Basit render yardımcıları ==== */
+function kv(key, val){
+  return `<div><span class="k">${key}:</span> <span class="v">${val}</span></div>`;
+}
+function renderPos(target, pos){
+  target.innerHTML = pos
+    ? kv('X', toFixedMaybe(pos.x)) + kv('Y', toFixedMaybe(pos.y)) + kv('Z', toFixedMaybe(pos.z))
+    : '<span class="muted">Bulunamadı</span>';
+}
+function renderSpawn(target, s){
+  if (!s){ target.innerHTML='<span class="muted">Bulunamadı</span>'; return; }
+  const dim = fmtDim(s.dimension ?? 'bilinmiyor');
+  target.innerHTML = kv('Dimension', dim) + kv('X', safe(s.x)) + kv('Y', safe(s.y)) + kv('Z', safe(s.z))
+    + (s.angle!==undefined ? kv('Açı', safe(s.angle)) : '')
+    + (s.forced!==undefined ? kv('Zorla', safe(s.forced)) : '');
+}
+function renderDeath(target, d){
+  if (!d){ target.innerHTML='<span class="muted">Bulunamadı</span>'; return; }
+  if ('note' in d){
+    target.innerHTML = `<div class="warn">Konum yok</div>${kv('Not', d.note)}${kv('DeathTime (ticks)', safe(d.ticks))}`;
+    return;
+  }
+  target.innerHTML = kv('Dimension', fmtDim(d.dimension ?? 'bilinmiyor')) + kv('X', safe(d.x)) + kv('Y', safe(d.y)) + kv('Z', safe(d.z));
+}
+function renderSelected(target, it){
+  if (!it){ target.innerHTML='<span class="muted">Boş</span>'; return; }
+  target.innerHTML = kv('ID', safe(it.id)) + kv('Adet', safe(it.Count)) + (it.Slot!==undefined ? kv('Slot', safe(it.Slot)):'');
+}
+function renderItems(target, arr){
+  if (!arr?.length){ target.innerHTML='<span class="muted">Boş</span>'; return; }
+  const rows = arr
+    .sort((a,b)=> (a.Slot??0) - (b.Slot??0))
+    .map(it=> `<div class="mono tiny">${('Slot' in it?`[${it.Slot}] `:'')}${safe(it.id)} x${safe(it.Count)}</div>`)
+    .join('');
+  target.innerHTML = rows;
+}
+
+function renderSummary(target, data){
+  const parts = [];
+  if ('Dimension' in data) parts.push(kv('Dimension', safe(data.Dimension)));
+  if ('Health' in data) parts.push(kv('Health', safe(data.Health)));
+  if ('foodLevel' in data) parts.push(kv('Food', safe(data.foodLevel)));
+  if ('XpLevel' in data) parts.push(kv('XP Seviye', safe(data.XpLevel)));
+  if ('XpP' in data) parts.push(kv('XP İlerleme', safe(data.XpP)));
+  if ('playerGameType' in data) parts.push(kv('Oyun Modu', safe(data.playerGameType)));
+  target.innerHTML = parts.join('') || '<span class="muted">Özet bilgi bulunamadı</span>';
+}
+
+function treeView(obj, indent=0){
+  const pad='  '.repeat(indent);
+  if (obj===null) return 'null';
+  if (typeof obj!=='object') return String(obj);
+  if (Array.isArray(obj)){
+    if (obj.length===0) return '[]';
+    return '[\n' + obj.map(v=> pad+'  '+treeView(v,indent+1)).join(',\n') + '\n'+pad+']';
+  }
+  const keys = Object.keys(obj);
+  if (keys.length===0) return '{}';
+  return '{\n' + keys.map(k=> pad+`  "${k}": `+treeView(obj[k],indent+1)).join(',\n') + '\n'+pad+'}';
+}
+
+/* ==== Olay bağlama ==== */
+let lastParsed = null;
+
+el('parse').addEventListener('click', async ()=>{
+  try{
+    const f = el('file').files[0];
+    if (!f){ alert('Lütfen bir .dat dosyası seçin'); return; }
+    statusPill('Çözümleniyor…');
+    const raw = await f.arrayBuffer();
+    const buf = await maybeDecompressGzip(raw);
+
+    const r = new NBTReader(buf).readRoot();
+    const data = r.data || {};
+    lastParsed = data;
+
+    // Alanlar
+    const pos = getPos(data);
+    const spawn = getSpawn(data);
+    const death = getDeath(data);
+    const inv = getInventory(data);
+    const ender = getEnder(data);
+    const selected = getSelectedItem(data);
+
+    // Render
+    el('summary').style.display='grid';
+    renderSummary(el('summary'), data);
+
+    el('sections').style.display='';
+    renderPos(el('pos'), pos);
+    renderSpawn(el('spawn'), spawn);
+    renderDeath(el('death'), death);
+    renderSelected(el('selected'), selected);
+    renderItems(el('inventory'), inv);
+    renderItems(el('ender'), ender);
+
+    el('tree').textContent = treeView(r,0);
+    el('downloadJson').disabled = false;
+
+    statusPill('Tamam', 'good');
+  }catch(err){
+    console.error(err);
+    statusPill('Hata', 'bad');
+    alert('Çözümlerken hata oluştu: ' + err.message);
+  }
+});
+
+el('downloadJson').addEventListener('click', ()=>{
+  if (!lastParsed){ return; }
+  const blob = new Blob([ JSON.stringify(lastParsed, (k,v)=> (typeof v==='bigint'? v.toString() : v), 2) ], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'player_dat_parsed.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+</body>
+</html>
