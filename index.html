@@ -28,6 +28,11 @@
     .good{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--err)}
     .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace}
     .tiny{font-size:12px}
+
+    /* ==== Eşya ikonları için ufak eklemeler (hiçbir şeyi bozmadan) ==== */
+    .item-row{display:flex;align-items:center;gap:8px;margin:2px 0}
+    .item-row img{width:20px;height:20px;image-rendering:pixelated;border-radius:4px;border:1px solid #223040;background:#0a121b}
+    .badge{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid #223040;background:#0f1722}
   </style>
 </head>
 <body>
@@ -99,8 +104,6 @@ const toFixedMaybe = (n) => (typeof n === 'number') ? (Math.abs(n)>=1e6 ? n.toEx
 
 /* ==== GZIP’i açmayı dene (DecompressionStream destekli) ==== */
 async function maybeDecompressGzip(buf) {
-  // Birçok player.dat gzip’li gelir. DecompressionStream çoğu modern tarayıcıda var.
-  // GZIP imzası 1F 8B ise dene.
   const u8 = new Uint8Array(buf);
   const isGzip = u8[0] === 0x1f && u8[1] === 0x8b;
   if (isGzip && 'DecompressionStream' in window) {
@@ -108,7 +111,7 @@ async function maybeDecompressGzip(buf) {
     const decompressed = await new Response(new Blob([buf]).stream().pipeThrough(ds)).arrayBuffer();
     return decompressed;
   }
-  return buf; // ya ham NBT’dir ya da tarayıcı açamıyordur
+  return buf;
 }
 
 /* ==== NBT Parser (Big-Endian) ==== */
@@ -117,7 +120,7 @@ class NBTReader {
   eof(){ return this.off >= this.view.byteLength; }
   u8b(){ const v=this.view.getUint8(this.off); this.off+=1; return v; }
   i8(){ const v=this.view.getInt8(this.off); this.off+=1; return v; }
-  i16(){ const v=this.view.getInt16(this.off,false); this.off+=2; return v; }        // BE
+  i16(){ const v=this.view.getInt16(this.off,false); this.off+=2; return v; }
   i32(){ const v=this.view.getInt32(this.off,false); this.off+=4; return v; }
   i64(){ const v=this.view.getBigInt64(this.off,false); this.off+=8; return v; }
   f32(){ const v=this.view.getFloat32(this.off,false); this.off+=4; return v; }
@@ -130,50 +133,50 @@ class NBTReader {
 
   readTagPayload(type){
     switch(type){
-      case 1: return this.i8();                           // Byte
-      case 2: return this.i16();                          // Short
-      case 3: return this.i32();                          // Int
-      case 4: return this.i64();                          // Long (BigInt)
-      case 5: return this.f32();                          // Float
-      case 6: return this.f64();                          // Double
-      case 7: {                                           // Byte_Array
+      case 1: return this.i8();
+      case 2: return this.i16();
+      case 3: return this.i32();
+      case 4: return this.i64();
+      case 5: return this.f32();
+      case 6: return this.f64();
+      case 7: {
         const n=this.i32(); const arr=new Int8Array(n);
         for(let i=0;i<n;i++) arr[i]=this.i8(); return Array.from(arr);
       }
-      case 8: return this.str();                          // String
-      case 9: {                                           // List
+      case 8: return this.str();
+      case 9: {
         const subType=this.u8b();
         const n=this.i32();
         const arr=new Array(n);
         for(let i=0;i<n;i++) arr[i]=this.readTagPayload(subType);
         return { _type:'list', subtype:subType, value:arr };
       }
-      case 10:{                                           // Compound
+      case 10:{
         const obj={};
         while(true){
           const t=this.u8b();
-          if (t===0) break; // End
+          if (t===0) break;
           const name=this.str();
           obj[name]=this.readTagPayload(t);
         }
         return obj;
       }
-      case 11:{                                           // Int_Array
+      case 11:{
         const n=this.i32(); const arr=new Int32Array(n);
         for(let i=0;i<n;i++) arr[i]=this.i32(); return Array.from(arr);
       }
-      case 12:{                                           // Long_Array
+      case 12:{
         const n=this.i32(); const arr=new Array(n);
-        for(let i=0;i<n;i++) arr[i]=this.i64(); return arr; // BigInt[]
+        for(let i=0;i<n;i++) arr[i]=this.i64(); return arr;
       }
       default: throw new Error('Bilinmeyen NBT türü: '+type);
     }
   }
 
   readRoot(){
-    const type=this.u8b(); // genelde 10 (Compound)
+    const type=this.u8b();
     if (type!==10) throw new Error('Kök NBT Compound (10) bekleniyordu, geldi: '+type);
-    const name=this.str(); // kök ismi (genelde boş veya "Player")
+    const name=this.str();
     const payload=this.readTagPayload(10);
     return { name, data: payload };
   }
@@ -181,17 +184,13 @@ class NBTReader {
 
 /* ==== Alan seçiciler (player.dat uyumlu, sürümlere toleranslı) ==== */
 function getPos(data){
-  // Pos: list<double>[x,y,z]
   const pos = data?.Pos?.value ?? data?.Pos;
   if (Array.isArray(pos) && pos.length>=3) return {x:pos[0], y:pos[1], z:pos[2]};
   return null;
 }
 
 function getSpawn(data){
-  // Eski sürümler: SpawnX, SpawnY, SpawnZ (+ SpawnDimension veya Dimension)
-  // Yeni sürümler: "Spawn" veya "SpawnPoint" benzeri alanlar nadir; en güvenlisi klasik alanlar.
   let dim = data?.SpawnDimension ?? data?.SpawnWorld ?? data?.Dimension;
-  // Bazı sürümlerde Dimension bir string yerine sayı/obj olabilir; gösterilebilir stringe çeviriyoruz.
   const sx = data?.SpawnX, sy = data?.SpawnY, sz = data?.SpawnZ;
   const forced = data?.SpawnForced;
   const angle = data?.SpawnAngle;
@@ -202,26 +201,23 @@ function getSpawn(data){
 }
 
 function getDeath(data){
-  // 1.20+ sürümlerde: LastDeathLocation: { dimension: "minecraft:...", pos: {X:int,Y:int,Z:int} } veya benzeri
   const ldl = data?.LastDeathLocation || data?.last_death_location;
   if (ldl){
     const d = ldl.dimension ?? ldl.Dimension ?? ldl.dim;
     const p = ldl.pos ?? ldl.block_position ?? ldl.Position;
-    if (p && (('X' in p) || Array.isArray(p))) {
+    if (p && (("X" in p) || Array.isArray(p))) {
       const x = Array.isArray(p) ? p[0] : p.X;
       const y = Array.isArray(p) ? p[1] : p.Y;
       const z = Array.isArray(p) ? p[2] : p.Z;
       return {dimension:d, x, y, z};
     }
   }
-  // Bazı mod/sürümlerde sadece "DeathTime" bulunur; konum vermez.
   if (data?.DeathTime !== undefined) return { note: 'DeathTime mevcut ancak konum alanı yok', ticks: data.DeathTime };
   return null;
 }
 
 function normalizeItem(it){
   if (!it || typeof it!=='object') return null;
-  // En yaygını: {id:"minecraft:stone", Count:1, Slot:0, tag:{...}}
   const id = it.id || it.Name || it.Item || it.item;
   const Count = it.Count ?? it.count ?? 1;
   const Slot = it.Slot ?? it.slot;
@@ -230,7 +226,6 @@ function normalizeItem(it){
 }
 
 function getList(listLike){
-  // NBT List’i { _type:'list', subtype, value:[...] } şeklinde geliyor; ya da doğrudan JS array olabilir.
   if (!listLike) return [];
   if (Array.isArray(listLike)) return listLike;
   if (listLike && listLike._type==='list') return listLike.value || [];
@@ -274,17 +269,175 @@ function renderDeath(target, d){
   }
   target.innerHTML = kv('Dimension', fmtDim(d.dimension ?? 'bilinmiyor')) + kv('X', safe(d.x)) + kv('Y', safe(d.y)) + kv('Z', safe(d.z));
 }
+
+/* ========================================================================
+   VANILLA EŞYA İKONLARI — GENEL, ŞABLON TABANLI, ÖNBELLEKLİ ÇÖZÜM
+   - Tek tek URL yazmak yok.
+   - minecraft:... olan tüm vanilla item’lar için bir dizi sağlayıcı denenir.
+   - İlk çalışan URL, belleğe + localStorage’a cache’lenir (hızlı yükleme).
+   ======================================================================== */
+
+// (Opsiyonel) Sadece modlu özel bir-iki eşya için manuel override tutmak istersen aç.
+// const ICON_OVERRIDES = {
+//   'some_mod:custom_item': ['https://.../custom_item.png']
+// };
+const ICON_OVERRIDES = {}; // şu an kapalı
+
+// Sağlayıcı şablonları: {url: (short)=>string} şeklinde.
+// short = diamond_pickaxe (minecraft: diamond_pickaxe’tan türetilir)
+const ICON_PROVIDERS = [
+  // minecraftitemids (32/64)
+  short => `https://minecraftitemids.com/item/32/${short}.png`,
+  short => `https://minecraftitemids.com/item/64/${short}.png`,
+
+  // PrismarineJS minecraft-assets (unpkg) — çeşitli sürümlere sırayla bak
+  short => `https://unpkg.com/minecraft-assets@latest/data/1.21/items/${short}.png`,
+  short => `https://unpkg.com/minecraft-assets@latest/data/1.20.6/items/${short}.png`,
+  short => `https://unpkg.com/minecraft-assets@latest/data/1.20.4/items/${short}.png`,
+  short => `https://unpkg.com/minecraft-assets@latest/data/1.19.4/items/${short}.png`,
+
+  // PrismarineJS minecraft-assets (github raw) — yedek
+  short => `https://raw.githubusercontent.com/PrismarineJS/minecraft-assets/master/data/1.21/items/${short}.png`,
+  short => `https://raw.githubusercontent.com/PrismarineJS/minecraft-assets/master/data/1.20.6/items/${short}.png`,
+  short => `https://raw.githubusercontent.com/PrismarineJS/minecraft-assets/master/data/1.20.4/items/${short}.png`,
+  short => `https://raw.githubusercontent.com/PrismarineJS/minecraft-assets/master/data/1.19.4/items/${short}.png`,
+];
+
+// Basit isim dönüştürücü (minecraft:carrot_on_a_stick → carrot_on_a_stick)
+const shortName = id => id.replace(/^minecraft:/,'').toLowerCase();
+
+// Bellek + kalıcı cache
+const iconUrlCache = new Map();
+const lsKey = 'mc_item_icon_cache_v1';
+
+// localStorage’taki önbelleği yükle
+try{
+  const raw = localStorage.getItem(lsKey);
+  if (raw){
+    const obj = JSON.parse(raw);
+    for(const k in obj) iconUrlCache.set(k, obj[k]);
+  }
+}catch{ /* boşver */ }
+
+// Cache’i localStorage’a dök
+function persistCache(){
+  try{
+    const obj = {};
+    iconUrlCache.forEach((v,k)=> obj[k]=v);
+    localStorage.setItem(lsKey, JSON.stringify(obj));
+  }catch{/* quota olabilir, sorun değil */}
+}
+
+function isVanilla(id){
+  return typeof id === 'string' && id.startsWith('minecraft:');
+}
+
+// <img> üretir; override → cache → sağlayıcı denemeleri
+function createIconIMG(vanillaId){
+  const s = shortName(vanillaId);
+
+  // 1) Manuel override (istenirse)
+  if (ICON_OVERRIDES[vanillaId]?.length){
+    const img = new Image();
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.alt = vanillaId;
+    let i = 0;
+    const urls = ICON_OVERRIDES[vanillaId].slice();
+    img.src = urls[i++];
+    img.onerror = ()=>{ if (i<urls.length) img.src = urls[i++]; else img.replaceWith(document.createComment('no-icon')); };
+    return img;
+  }
+
+  // 2) Bellek/cache
+  if (iconUrlCache.has(s)){
+    const cached = iconUrlCache.get(s);
+    const img = new Image();
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.alt = vanillaId;
+    img.src = cached;
+    img.onerror = () => { // cached bozulmuşsa temizle ve tüm sağlayıcıları dene
+      iconUrlCache.delete(s);
+      persistCache();
+      const fresh = createIconIMG_NoCache(vanillaId, s);
+      img.replaceWith(fresh ?? document.createComment('no-icon'));
+    };
+    return img;
+  }
+
+  // 3) Tüm sağlayıcıları dene ve ilk çalışanı cache’le
+  return createIconIMG_NoCache(vanillaId, s);
+}
+
+function createIconIMG_NoCache(vanillaId, s){
+  const urls = ICON_PROVIDERS.map(fn => fn(s));
+  if (!urls.length) return null;
+
+  const img = new Image();
+  img.loading = 'lazy';
+  img.decoding = 'async';
+  img.alt = vanillaId;
+
+  let i = 0;
+  img.src = urls[i++];
+
+  img.onerror = ()=>{
+    if (i < urls.length){
+      img.src = urls[i++];
+    } else {
+      img.replaceWith(document.createComment('no-icon'));
+    }
+  };
+
+  img.onload = ()=>{
+    // Başarılı ilk URL’yi cache’le
+    iconUrlCache.set(s, img.src);
+    persistCache();
+  };
+
+  return img;
+}
+
+function formatItemText(it){
+  const slotTxt = ('Slot' in it && it.Slot !== undefined) ? `[${it.Slot}] ` : '';
+  return `${slotTxt}${safe(it.id)} x${safe(it.Count)}`;
+}
+
+function renderItemRow(it){
+  const row = document.createElement('div');
+  row.className = 'item-row mono tiny';
+  if (isVanilla(it.id)){
+    const img = createIconIMG(it.id);
+    if (img) row.appendChild(img);
+  }
+  const span = document.createElement('span');
+  span.textContent = formatItemText(it);
+  row.appendChild(span);
+  return row;
+}
+
 function renderSelected(target, it){
   if (!it){ target.innerHTML='<span class="muted">Boş</span>'; return; }
-  target.innerHTML = kv('ID', safe(it.id)) + kv('Adet', safe(it.Count)) + (it.Slot!==undefined ? kv('Slot', safe(it.Slot)):'');
+  target.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'badge mono tiny';
+  if (isVanilla(it.id)){
+    const img = createIconIMG(it.id);
+    if (img) wrap.appendChild(img);
+  }
+  const text = document.createElement('span');
+  text.textContent = `ID: ${safe(it.id)} · Adet: ${safe(it.Count)}${(it.Slot!==undefined?` · Slot: ${safe(it.Slot)}`:'')}`;
+  wrap.appendChild(text);
+  target.appendChild(wrap);
 }
+
 function renderItems(target, arr){
   if (!arr?.length){ target.innerHTML='<span class="muted">Boş</span>'; return; }
-  const rows = arr
+  target.innerHTML = '';
+  arr
     .sort((a,b)=> (a.Slot??0) - (b.Slot??0))
-    .map(it=> `<div class="mono tiny">${('Slot' in it?`[${it.Slot}] `:'')}${safe(it.id)} x${safe(it.Count)}</div>`)
-    .join('');
-  target.innerHTML = rows;
+    .forEach(it=> target.appendChild(renderItemRow(it)));
 }
 
 function renderSummary(target, data){
@@ -326,7 +479,6 @@ el('parse').addEventListener('click', async ()=>{
     const data = r.data || {};
     lastParsed = data;
 
-    // Alanlar
     const pos = getPos(data);
     const spawn = getSpawn(data);
     const death = getDeath(data);
@@ -334,7 +486,6 @@ el('parse').addEventListener('click', async ()=>{
     const ender = getEnder(data);
     const selected = getSelectedItem(data);
 
-    // Render
     el('summary').style.display='grid';
     renderSummary(el('summary'), data);
 
