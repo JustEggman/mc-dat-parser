@@ -29,7 +29,6 @@
     .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace}
     .tiny{font-size:12px}
 
-    /* ==== Eşya ikonları için ufak eklemeler (hiçbir şeyi bozmadan) ==== */
     .item-row{display:flex;align-items:center;gap:8px;margin:2px 0}
     .item-row img{width:20px;height:20px;image-rendering:pixelated;border-radius:4px;border:1px solid #223040;background:#0a121b}
     .badge{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid #223040;background:#0f1722}
@@ -95,14 +94,14 @@
 </div>
 
 <script>
-/* ==== Yardımcılar ==== */
+
 const el = id => document.getElementById(id);
 const statusPill = (txt, cls='') => { const s = el('status'); s.textContent = txt; s.className = 'pill ' + cls; };
 const fmtDim = v => typeof v === 'string' ? v : (v && v.value) || String(v);
 const safe = v => (v===undefined||v===null) ? '—' : (typeof v==='object' ? JSON.stringify(v) : String(v));
 const toFixedMaybe = (n) => (typeof n === 'number') ? (Math.abs(n)>=1e6 ? n.toExponential(2) : n.toFixed(2)) : String(n);
 
-/* ==== GZIP’i açmayı dene (DecompressionStream destekli) ==== */
+
 async function maybeDecompressGzip(buf) {
   const u8 = new Uint8Array(buf);
   const isGzip = u8[0] === 0x1f && u8[1] === 0x8b;
@@ -114,7 +113,7 @@ async function maybeDecompressGzip(buf) {
   return buf;
 }
 
-/* ==== NBT Parser (Big-Endian) ==== */
+
 class NBTReader {
   constructor(buf){ this.view=new DataView(buf); this.u8=new Uint8Array(buf); this.off=0; }
   eof(){ return this.off >= this.view.byteLength; }
@@ -182,7 +181,7 @@ class NBTReader {
   }
 }
 
-/* ==== Alan seçiciler (player.dat uyumlu, sürümlere toleranslı) ==== */
+
 function getPos(data){
   const pos = data?.Pos?.value ?? data?.Pos;
   if (Array.isArray(pos) && pos.length>=3) return {x:pos[0], y:pos[1], z:pos[2]};
@@ -245,7 +244,7 @@ function getSelectedItem(data){
   return normalizeItem(s);
 }
 
-/* ==== Basit render yardımcıları ==== */
+
 function kv(key, val){
   return `<div><span class="k">${key}:</span> <span class="v">${val}</span></div>`;
 }
@@ -270,47 +269,36 @@ function renderDeath(target, d){
   target.innerHTML = kv('Dimension', fmtDim(d.dimension ?? 'bilinmiyor')) + kv('X', safe(d.x)) + kv('Y', safe(d.y)) + kv('Z', safe(d.z));
 }
 
-/* ========================================================================
-   VANILLA EŞYA İKONLARI — GENEL, ŞABLON TABANLI, ÖNBELLEKLİ ÇÖZÜM
-   - Tek tek URL yazmak yok.
-   - minecraft:... olan tüm vanilla item’lar için bir dizi sağlayıcı denenir.
-   - İlk çalışan URL, belleğe + localStorage’a cache’lenir (hızlı yükleme).
-   ======================================================================== */
 
-// (Opsiyonel) Sadece modlu özel bir-iki eşya için manuel override tutmak istersen aç.
-// const ICON_OVERRIDES = {
-//   'some_mod:custom_item': ['https://.../custom_item.png']
-// };
 const ICON_OVERRIDES = {}; // şu an kapalı
 
-// Sağlayıcı şablonları: {url: (short)=>string} şeklinde.
-// short = diamond_pickaxe (minecraft: diamond_pickaxe’tan türetilir)
+
 const ICON_PROVIDERS = [
-  // minecraftitemids (32/64)
+
   short => `https://minecraftitemids.com/item/32/${short}.png`,
   short => `https://minecraftitemids.com/item/64/${short}.png`,
 
-  // PrismarineJS minecraft-assets (unpkg) — çeşitli sürümlere sırayla bak
+
   short => `https://unpkg.com/minecraft-assets@latest/data/1.21/items/${short}.png`,
   short => `https://unpkg.com/minecraft-assets@latest/data/1.20.6/items/${short}.png`,
   short => `https://unpkg.com/minecraft-assets@latest/data/1.20.4/items/${short}.png`,
   short => `https://unpkg.com/minecraft-assets@latest/data/1.19.4/items/${short}.png`,
 
-  // PrismarineJS minecraft-assets (github raw) — yedek
+
   short => `https://raw.githubusercontent.com/PrismarineJS/minecraft-assets/master/data/1.21/items/${short}.png`,
   short => `https://raw.githubusercontent.com/PrismarineJS/minecraft-assets/master/data/1.20.6/items/${short}.png`,
   short => `https://raw.githubusercontent.com/PrismarineJS/minecraft-assets/master/data/1.20.4/items/${short}.png`,
   short => `https://raw.githubusercontent.com/PrismarineJS/minecraft-assets/master/data/1.19.4/items/${short}.png`,
 ];
 
-// Basit isim dönüştürücü (minecraft:carrot_on_a_stick → carrot_on_a_stick)
+
 const shortName = id => id.replace(/^minecraft:/,'').toLowerCase();
 
-// Bellek + kalıcı cache
+
 const iconUrlCache = new Map();
 const lsKey = 'mc_item_icon_cache_v1';
 
-// localStorage’taki önbelleği yükle
+
 try{
   const raw = localStorage.getItem(lsKey);
   if (raw){
@@ -319,7 +307,7 @@ try{
   }
 }catch{ /* boşver */ }
 
-// Cache’i localStorage’a dök
+
 function persistCache(){
   try{
     const obj = {};
@@ -332,11 +320,11 @@ function isVanilla(id){
   return typeof id === 'string' && id.startsWith('minecraft:');
 }
 
-// <img> üretir; override → cache → sağlayıcı denemeleri
+
 function createIconIMG(vanillaId){
   const s = shortName(vanillaId);
 
-  // 1) Manuel override (istenirse)
+
   if (ICON_OVERRIDES[vanillaId]?.length){
     const img = new Image();
     img.loading = 'lazy';
@@ -349,7 +337,7 @@ function createIconIMG(vanillaId){
     return img;
   }
 
-  // 2) Bellek/cache
+ 
   if (iconUrlCache.has(s)){
     const cached = iconUrlCache.get(s);
     const img = new Image();
@@ -366,7 +354,7 @@ function createIconIMG(vanillaId){
     return img;
   }
 
-  // 3) Tüm sağlayıcıları dene ve ilk çalışanı cache’le
+
   return createIconIMG_NoCache(vanillaId, s);
 }
 
@@ -391,7 +379,7 @@ function createIconIMG_NoCache(vanillaId, s){
   };
 
   img.onload = ()=>{
-    // Başarılı ilk URL’yi cache’le
+
     iconUrlCache.set(s, img.src);
     persistCache();
   };
@@ -464,7 +452,7 @@ function treeView(obj, indent=0){
   return '{\n' + keys.map(k=> pad+`  "${k}": `+treeView(obj[k],indent+1)).join(',\n') + '\n'+pad+'}';
 }
 
-/* ==== Olay bağlama ==== */
+
 let lastParsed = null;
 
 el('parse').addEventListener('click', async ()=>{
